@@ -124,7 +124,12 @@ export class GeminiClient {
         );
       }
 
-      const rawText = await response.text();
+      // Read the streaming response incrementally.
+      // Gemini's StreamGenerate endpoint keeps the connection open and sends
+      // length-prefixed frames as they become available. We must read via
+      // the body stream — response.text() would block until the connection
+      // closes, which can take far longer than the actual generation time.
+      const rawText = await this.readStream(response);
 
       // Parse the framed response and extract results
       const envelopes = parseFramedResponse(rawText);
@@ -146,6 +151,38 @@ export class GeminiClient {
     } finally {
       clearTimeout(timeoutId);
     }
+  }
+
+  /**
+   * Read a streaming response body to completion.
+   * Uses the ReadableStream API to properly handle Gemini's
+   * streaming endpoint. The overall AbortController timeout
+   * protects against truly stuck connections.
+   */
+  private async readStream(response: Response): Promise<string> {
+    const reader = response.body?.getReader();
+    if (!reader) {
+      return response.text();
+    }
+
+    const decoder = new TextDecoder();
+    let result = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          result += decoder.decode(value, { stream: true });
+        }
+      }
+    } finally {
+      // Final flush
+      result += decoder.decode();
+      try { reader.cancel(); } catch { /* ignore */ }
+    }
+
+    return result;
   }
 
   /**
