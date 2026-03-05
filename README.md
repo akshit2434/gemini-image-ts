@@ -5,7 +5,7 @@ Minimal, zero-dependency TypeScript client for generating images through Gemini'
 ## Features
 
 - 🖼️ **Image generation** via Gemini's web UI (reverse-engineered)
-- 🎯 **Model selection** — choose between Flash, Pro, and Flash Thinking
+- 🎯 **Model selection** — choose between Pro and Flash
 - 🍪 **Simple auth** — just provide your browser cookies
 - 🔄 **Cookie rotation** — auto-refresh `__Secure-1PSIDTS`
 - 📦 **Zero runtime dependencies** — only Node.js native `fetch`
@@ -56,26 +56,25 @@ Choose a model per-client or per-request:
 // Set default model for all requests
 const client = new GeminiClient({
   cookies: { psid: "...", psidts: "..." },
-  model: "gemini-3.0-flash",    // Flash (fast)
+  model: "flash",    // Nanobanana 2 (fast)
 });
 
 // Override per-request
 const result = await client.generate("Generate a cat", {
-  model: "gemini-3.0-pro",      // Pro (higher quality)
+  model: "pro",      // Nanobanana Pro (higher quality)
 });
 
 // Change default at runtime
-client.setModel("gemini-3.0-flash-thinking");
+client.setModel("pro");
 ```
 
 ### Available Models
 
-| Name           | Key                           | Description                  |
-| -------------- | ----------------------------- | ---------------------------- |
-| Default        | `"unspecified"`               | Gemini's default model       |
-| Flash          | `"gemini-3.0-flash"`          | Fast generation              |
-| Pro            | `"gemini-3.0-pro"`            | Higher quality               |
-| Flash Thinking | `"gemini-3.0-flash-thinking"` | Flash with visible reasoning |
+| Name    | Key             | Engine         | Description      |
+| ------- | --------------- | -------------- | ---------------- |
+| Default | `"unspecified"` | —              | Gemini's default |
+| Pro     | `"pro"`         | Nanobanana Pro | Higher quality   |
+| Flash   | `"flash"`       | Nanobanana 2   | Fast generation  |
 
 ## API
 
@@ -97,7 +96,7 @@ Send a prompt and get back text + images.
 
 ```typescript
 const result = await client.generate("Generate a cute cat", {
-  model: "gemini-3.0-flash",  // optional per-request override
+  model: "flash",  // optional per-request override
 });
 
 // result.text             → string
