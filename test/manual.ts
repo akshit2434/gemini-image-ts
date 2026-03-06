@@ -10,6 +10,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { GeminiClient } from "../src/index.js";
 
+declare const process: any;
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SESSION_PATH = path.resolve(__dirname, "../../../gemini-session.json");
 
@@ -19,6 +21,8 @@ async function main() {
     sessionPath: SESSION_PATH,
     model: "flash",
     timeout: 90_000,
+    headless: false,
+    onProgress: (msg) => console.log(`  [Progress] ${msg}`),
   });
 
   console.log("🔑 Initializing (loading session + fetching access token)...");
@@ -57,7 +61,7 @@ async function main() {
       console.log(`  ${img.title}: ${img.url}`);
     }
   }
-
+  await client.close();
   console.log("\n✅ Done!");
 }
 

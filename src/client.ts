@@ -37,6 +37,7 @@ export class GeminiClient {
   private reqId: number;
   private debug: boolean;
   private headless: boolean;
+  private onProgress?: (message: string) => void;
 
   public browser: Browser | null = null;
   public context: BrowserContext | null = null;
@@ -52,6 +53,7 @@ export class GeminiClient {
     this.model = options.model ?? "unspecified";
     this.debug = options.debug ?? false;
     this.headless = options.headless ?? true;
+    this.onProgress = options.onProgress;
     this.reqId = Math.floor(Math.random() * 90000) + 10000;
   }
 
@@ -69,7 +71,9 @@ export class GeminiClient {
     }
 
     if (!this.browser) {
-      if (this.debug) console.log(`[GeminiClient] Launching browser (headless: ${this.headless})...`);
+      const startTime = Date.now();
+      if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Launching browser (headless: ${this.headless})...`);
+      this.onProgress?.("Launching browser...");
       this.browser = await chromium.launch({
         headless: this.headless,
         args: STEALTH_ARGS,
@@ -96,21 +100,31 @@ export class GeminiClient {
       this.page = await this.context.newPage();
     }
 
-    // Navigate to Gemini to ensure cookies are active and tokens are available
-    if (this.debug) console.log("[GeminiClient] Navigating to Gemini app...");
-    await this.page!.goto("https://gemini.google.com/app", {
-      waitUntil: "domcontentloaded",
-      timeout: this.timeout,
-    });
+    // Optimization: Skip navigation if already on the app page
+    const currentUrl = this.page!.url();
+    if (currentUrl.includes("gemini.google.com/app")) {
+      if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Already on Gemini app page, skipping navigation.`);
+    } else {
+      const navStart = Date.now();
+      if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Navigating to Gemini app...`);
+      this.onProgress?.("Navigating to Gemini...");
+      await this.page!.goto("https://gemini.google.com/app", {
+        waitUntil: "domcontentloaded",
+        timeout: this.timeout,
+      });
+      if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Navigation took ${Date.now() - navStart}ms`);
+    }
 
     // Extract tokens via Playwright
     if (this.debug) {
       const title = await this.page!.title();
-      console.log(`[GeminiClient] Page title: "${title}"`);
-      console.log("[GeminiClient] Extracting session tokens...");
+      console.log(`[${new Date().toISOString()}] [GeminiClient] Page title: "${title}"`);
+      console.log(`[${new Date().toISOString()}] [GeminiClient] Extracting session tokens...`);
     }
+    const tokenStart = Date.now();
+    this.onProgress?.("Extracting session tokens...");
     this.tokens = await extractTokensFromPage(this.page!);
-    if (this.debug) console.log("[GeminiClient] Tokens extracted successfully.");
+    if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Tokens extracted successfully in ${Date.now() - tokenStart}ms`);
     
     // Update local cookies state from context (in case of rotation)
     const cookies = await this.context!.cookies();
@@ -140,7 +154,10 @@ export class GeminiClient {
     const queryString = new URLSearchParams(params).toString();
     const url = `${ENDPOINTS.GENERATE}?${queryString}`;
     const body = buildRequestBody(prompt, this.tokens.accessToken);
-    if (this.debug) console.log(`[GeminiClient] 🚀 STARTING GENERATE - Prompt: "${prompt.slice(0, 50)}..."`);
+    if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] 🚀 STARTING GENERATE - Prompt: "${prompt.slice(0, 50)}..."`);
+    this.onProgress?.("Generating content...");
+
+    const genStart = Date.now();
 
     const selectedModel = options?.model ?? this.model;
     const modelConfig =
@@ -159,8 +176,14 @@ export class GeminiClient {
     }
 
     try {
+      // Ensure page is still alive, if not re-init
+      if (!this.page || this.page.isClosed()) {
+        if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Page closed or missing, re-initializing...`);
+        await this.init();
+      }
+
       // Execute the request INSIDE the browser context
-      const rawText = await this.page.evaluate(
+      const rawText = await this.page!.evaluate(
         async ({ url, body, headers }) => {
           const response = await fetch(url, {
             method: "POST",
@@ -178,6 +201,7 @@ export class GeminiClient {
       );
 
       const envelopes = parseFramedResponse(rawText);
+      if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Initial API request took ${Date.now() - genStart}ms`);
 
       if (envelopes.length === 0) {
         throw new APIError("Empty response from Gemini.");
@@ -186,8 +210,8 @@ export class GeminiClient {
       const result = extractResult(envelopes, this.cookies);
 
       if (this.debug) {
-        console.log(`[GeminiClient] Extracted text: "${result.text.slice(0, 100)}..."`);
-        console.log(`[GeminiClient] Found ${result.generatedImages.length} generated images.`);
+        console.log(`[${new Date().toISOString()}] [GeminiClient] Extracted text: "${result.text.slice(0, 100)}..."`);
+        console.log(`[${new Date().toISOString()}] [GeminiClient] Found ${result.generatedImages.length} generated images.`);
       }
 
       // Auto-refresh and retry if session expired mid-run

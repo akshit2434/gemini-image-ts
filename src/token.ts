@@ -20,22 +20,48 @@ export async function extractTokensFromPage(
     tokens = await page.evaluate(() => {
       const html = document.documentElement.innerHTML;
 
-      const getMatch = (key: string) => {
+      const accessToken = ((): string | null => {
+        const key = "SNlM0e";
+        const altKey = "snlM0e";
         const regexes = [
           new RegExp(`"${key}":\\s*"(.*?)"`),
           new RegExp(`'${key}':\\s*'(.*?)'`),
-          new RegExp(`"${key}",\\s*null,\\s*"(.*?)"`), // Sometimes in AF_initDataCallback
+          new RegExp(`"${key}",\\s*null,\\s*"(.*?)"`),
+          new RegExp(`"${altKey}":\\s*"(.*?)"`),
+          new RegExp(`'${altKey}':\\s*'(.*?)'`),
         ];
         for (const re of regexes) {
           const m = html.match(re);
           if (m?.[1]) return m[1];
         }
         return null;
-      };
+      })();
 
-      const accessToken = getMatch("SNlM0e") || getMatch("snlM0e");
-      const buildLabel = getMatch("cfb2h");
-      const sessionId = getMatch("FdrFJe");
+      const buildLabel = ((): string | null => {
+        const key = "cfb2h";
+        const regexes = [
+          new RegExp(`"${key}":\\s*"(.*?)"`),
+          new RegExp(`'${key}':\\s*'(.*?)'`),
+        ];
+        for (const re of regexes) {
+          const m = html.match(re);
+          if (m?.[1]) return m[1];
+        }
+        return null;
+      })();
+
+      const sessionId = ((): string | null => {
+        const key = "FdrFJe";
+        const regexes = [
+          new RegExp(`"${key}":\\s*"(.*?)"`),
+          new RegExp(`'${key}':\\s*'(.*?)'`),
+        ];
+        for (const re of regexes) {
+          const m = html.match(re);
+          if (m?.[1]) return m[1];
+        }
+        return null;
+      })();
 
       // Debug: find keys in WIZ_global_data
       let wizKeys: string[] = [];

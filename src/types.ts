@@ -35,6 +35,8 @@ export interface GeminiClientOptions {
   debug?: boolean;
   /** Run browser in headless mode (default: true) */
   headless?: boolean;
+  /** Callback for progress updates */
+  onProgress?: (message: string) => void;
 }
 
 /**
