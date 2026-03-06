@@ -1,4 +1,5 @@
-import type { GeneratedImage, GenerateResult, WebImage } from "./types.js";
+import { GeneratedImage } from "./types.js";
+import type { GeminiCookies, GenerateResult, WebImage } from "./types.js";
 
 /**
  * Safely navigate a deeply nested structure (arrays/objects) using a path
@@ -109,7 +110,7 @@ export function parseFramedResponse(raw: string): unknown[] {
 /**
  * Extract generated images, web images, and text from parsed response envelopes.
  */
-export function extractResult(envelopes: unknown[]): GenerateResult {
+export function extractResult(envelopes: unknown[], cookies: GeminiCookies): GenerateResult {
   const result: GenerateResult = {
     text: "",
     generatedImages: [],
@@ -181,15 +182,14 @@ export function extractResult(envelopes: unknown[]): GenerateResult {
             const imgNum = getNestedValue(genImgData, [3, 6]) as
               | number
               | undefined;
-            result.generatedImages.push({
-              // Append =s2048 for full resolution
-              url: `${url}=s2048`,
-              title: imgNum
-                ? `[Generated Image ${imgNum}]`
-                : "[Generated Image]",
-              alt:
-                (getNestedValue(genImgData, [3, 5, 0], "") as string) || "",
-            });
+            result.generatedImages.push(
+              new GeneratedImage({
+                url: `${url}=s2048`,
+                title: imgNum ? `[Generated Image ${imgNum}]` : "[Generated Image]",
+                alt: (getNestedValue(genImgData, [3, 5, 0], "") as string) || "",
+                cookies,
+              })
+            );
           }
         }
       }

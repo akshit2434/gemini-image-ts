@@ -1,10 +1,10 @@
 import { ENDPOINTS, DEFAULT_HEADERS, MODELS } from "./constants.js";
 import type { ModelName } from "./constants.js";
-import { buildCookieHeader, rotatePsidts } from "./cookies.js";
 import { AuthError, APIError } from "./errors.js";
 import { parseFramedResponse, extractResult } from "./parser.js";
 import { buildQueryParams, buildRequestBody } from "./payload.js";
-import { fetchAccessToken } from "./token.js";
+import { extractTokensFromPage } from "./token.js";
+import { isSessionExpired } from "./session.js";
 import type {
   GeminiClientOptions,
   GeminiCookies,
@@ -12,183 +12,221 @@ import type {
   GenerateResult,
   SessionTokens,
 } from "./types.js";
+import type { Browser, BrowserContext, Page } from "playwright";
+
+const STEALTH_ARGS = [
+  "--disable-blink-features=AutomationControlled",
+  "--no-first-run",
+  "--no-default-browser-check",
+  "--disable-infobars",
+];
+
+const USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 /**
  * Minimal client for Gemini web image generation.
- *
- * @example
- * ```ts
- * const client = new GeminiClient({
- *   cookies: { psid: "YOUR_PSID", psidts: "YOUR_PSIDTS" },
- * });
- * await client.init();
- * const result = await client.generateImages("Generate a sunset over mountains");
- * console.log(result.generatedImages);
- * ```
+ * Now routes all requests through a headless Playwright browser to prevent session termination.
  */
 export class GeminiClient {
   private cookies: GeminiCookies;
+  private sessionPath: string | null;
   private timeout: number;
   private model: ModelName | string;
   private tokens: SessionTokens | null = null;
   private reqId: number;
+  private debug: boolean;
+  private headless: boolean;
+
+  public browser: Browser | null = null;
+  public context: BrowserContext | null = null;
+  public page: Page | null = null;
 
   constructor(options: GeminiClientOptions) {
-    this.cookies = { ...options.cookies };
-    this.timeout = options.timeout ?? 30_000;
+    if (!options.sessionPath && !options.cookies) {
+      throw new Error("GeminiClient requires either sessionPath or cookies.");
+    }
+    this.sessionPath = options.sessionPath ?? null;
+    this.cookies = options.cookies ?? { psid: "", psidts: "" };
+    this.timeout = options.timeout ?? 60_000;
     this.model = options.model ?? "unspecified";
+    this.debug = options.debug ?? false;
+    this.headless = options.headless ?? true;
     this.reqId = Math.floor(Math.random() * 90000) + 10000;
   }
 
   /**
-   * Initialize the client by fetching the SNlM0e access token and
-   * session metadata from the Gemini page.
-   *
-   * Must be called before `generate()` or `generateImages()`.
-   *
-   * @throws {AuthError} If cookies are invalid or expired.
+   * Initialize the client by launching a headless browser and navigating to Gemini.
+   * This extracts the necessary tokens while ensuring the session is seen as a real browser.
    */
   async init(): Promise<void> {
-    this.tokens = await fetchAccessToken(this.cookies);
-  }
-
-  /**
-   * Try to refresh the __Secure-1PSIDTS cookie.
-   * Call this if you get auth errors after a long-running session.
-   *
-   * @returns The new PSIDTS value, or null if rotation failed.
-   */
-  async refreshCookies(): Promise<string | null> {
-    const newPsidts = await rotatePsidts(this.cookies);
-    if (newPsidts) {
-      this.cookies.psidts = newPsidts;
+    let chromium: typeof import("playwright").chromium;
+    try {
+      const pw = await import("playwright");
+      chromium = pw.chromium;
+    } catch {
+      throw new Error("playwright is required. Install it: pnpm add playwright");
     }
-    return newPsidts;
+
+    if (!this.browser) {
+      if (this.debug) console.log(`[GeminiClient] Launching browser (headless: ${this.headless})...`);
+      this.browser = await chromium.launch({
+        headless: this.headless,
+        args: STEALTH_ARGS,
+      });
+
+      const contextOptions: any = {
+        userAgent: USER_AGENT,
+      };
+
+      if (this.sessionPath) {
+        contextOptions.storageState = this.sessionPath;
+      }
+
+      this.context = await this.browser.newContext(contextOptions);
+
+      // If raw cookies were provided, set them in the context
+      if (!this.sessionPath && this.cookies.psid) {
+        await this.context.addCookies([
+          { name: "__Secure-1PSID", value: this.cookies.psid, domain: ".google.com", path: "/" },
+          { name: "__Secure-1PSIDTS", value: this.cookies.psidts, domain: ".google.com", path: "/" },
+        ]);
+      }
+
+      this.page = await this.context.newPage();
+    }
+
+    // Navigate to Gemini to ensure cookies are active and tokens are available
+    if (this.debug) console.log("[GeminiClient] Navigating to Gemini app...");
+    await this.page!.goto("https://gemini.google.com/app", {
+      waitUntil: "domcontentloaded",
+      timeout: this.timeout,
+    });
+
+    // Extract tokens via Playwright
+    if (this.debug) {
+      const title = await this.page!.title();
+      console.log(`[GeminiClient] Page title: "${title}"`);
+      console.log("[GeminiClient] Extracting session tokens...");
+    }
+    this.tokens = await extractTokensFromPage(this.page!);
+    if (this.debug) console.log("[GeminiClient] Tokens extracted successfully.");
+    
+    // Update local cookies state from context (in case of rotation)
+    const cookies = await this.context!.cookies();
+    const psid = cookies.find((c) => c.name === "__Secure-1PSID")?.value;
+    const psidts = cookies.find((c) => c.name === "__Secure-1PSIDTS")?.value;
+    if (psid && psidts) {
+      this.cookies = { psid, psidts };
+      // If we have a session path, keep it updated
+      if (this.sessionPath) {
+        await this.context!.storageState({ path: this.sessionPath });
+      }
+    }
   }
 
   /**
-   * Send a prompt to Gemini and return the full result including
-   * text, generated images, and web images.
-   *
-   * @param prompt - Text prompt to send
-   * @param options - Optional overrides (e.g. model)
-   *
-   * @throws {AuthError} If client is not initialized.
-   * @throws {APIError} If the request fails or response can't be parsed.
+   * Send a prompt to Gemini. All network traffic is routed through the Playwright page.
    */
   async generate(prompt: string, options?: GenerateOptions): Promise<GenerateResult> {
-    if (!this.tokens) {
-      throw new AuthError(
-        "Client not initialized. Call `await client.init()` first."
-      );
+    if (!this.tokens || !this.page) {
+      throw new AuthError("Client not initialized. Call `await client.init()` first.");
     }
 
     const reqId = this.reqId;
     this.reqId += 100000;
 
-    // Build query parameters
     const params = buildQueryParams(reqId, this.tokens);
     const queryString = new URLSearchParams(params).toString();
     const url = `${ENDPOINTS.GENERATE}?${queryString}`;
-
-    // Build request body
     const body = buildRequestBody(prompt, this.tokens.accessToken);
+    if (this.debug) console.log(`[GeminiClient] 🚀 STARTING GENERATE - Prompt: "${prompt.slice(0, 50)}..."`);
 
-    // Resolve model — per-request override takes priority over default
     const selectedModel = options?.model ?? this.model;
     const modelConfig =
       selectedModel in MODELS
         ? MODELS[selectedModel as ModelName]
         : MODELS.unspecified;
 
-    // Make the request
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    const headers = {
+      ...DEFAULT_HEADERS,
+      ...modelConfig.headers,
+    };
+
+    if (this.debug) {
+      console.log(`[GeminiClient] Generating with model: ${selectedModel}`);
+      console.log(`[GeminiClient] URL: ${url}`);
+    }
 
     try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          ...DEFAULT_HEADERS,
-          ...modelConfig.headers,
-          Cookie: buildCookieHeader(this.cookies),
+      // Execute the request INSIDE the browser context
+      const rawText = await this.page.evaluate(
+        async ({ url, body, headers }) => {
+          const response = await fetch(url, {
+            method: "POST",
+            headers,
+            body,
+          });
+
+          if (!response.ok) {
+            throw new Error(`Gemini request failed with status ${response.status}`);
+          }
+
+          return await response.text();
         },
-        body,
-        signal: controller.signal,
-        redirect: "follow",
-      });
+        { url, body, headers }
+      );
 
-      if (!response.ok) {
-        throw new APIError(
-          `Gemini request failed with status ${response.status}`
-        );
-      }
-
-      // Read the streaming response incrementally.
-      // Gemini's StreamGenerate endpoint keeps the connection open and sends
-      // length-prefixed frames as they become available. We must read via
-      // the body stream — response.text() would block until the connection
-      // closes, which can take far longer than the actual generation time.
-      const rawText = await this.readStream(response);
-
-      // Parse the framed response and extract results
       const envelopes = parseFramedResponse(rawText);
 
       if (envelopes.length === 0) {
-        throw new APIError(
-          "Empty response from Gemini. The response contained no parseable data."
-        );
+        throw new APIError("Empty response from Gemini.");
       }
 
-      return extractResult(envelopes);
+      const result = extractResult(envelopes, this.cookies);
+
+      if (this.debug) {
+        console.log(`[GeminiClient] Extracted text: "${result.text.slice(0, 100)}..."`);
+        console.log(`[GeminiClient] Found ${result.generatedImages.length} generated images.`);
+      }
+
+      // Auto-refresh and retry if session expired mid-run
+      if (
+        result.generatedImages.length === 0 &&
+        isSessionExpired(result.text) &&
+        !options?._isRetry
+      ) {
+        if (this.debug) {
+          console.log("[GeminiClient] Session expiry detected in response text. Refreshing...");
+        }
+        await this.init();
+        return this.generate(prompt, { ...options, _isRetry: true } as GenerateOptions);
+      }
+
+      return result;
     } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw new APIError(
-          `Request timed out after ${this.timeout}ms. Try increasing the timeout.`
-        );
+      if (error instanceof Error) {
+        throw new APIError(error.message);
       }
       throw error;
-    } finally {
-      clearTimeout(timeoutId);
     }
   }
 
   /**
-   * Read a streaming response body to completion.
-   * Uses the ReadableStream API to properly handle Gemini's
-   * streaming endpoint. The overall AbortController timeout
-   * protects against truly stuck connections.
+   * Close the browser instance.
    */
-  private async readStream(response: Response): Promise<string> {
-    const reader = response.body?.getReader();
-    if (!reader) {
-      return response.text();
+  async close(): Promise<void> {
+    if (this.browser) {
+      await this.browser.close();
+      this.browser = null;
+      this.context = null;
+      this.page = null;
+      this.tokens = null;
     }
-
-    const decoder = new TextDecoder();
-    let result = "";
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) {
-          result += decoder.decode(value, { stream: true });
-        }
-      }
-    } finally {
-      // Final flush
-      result += decoder.decode();
-      try { reader.cancel(); } catch { /* ignore */ }
-    }
-
-    return result;
   }
 
   /**
-   * Convenience method: send a prompt and return only the generated images.
-   * Automatically prepends "Generate image: " to the prompt if not already present,
-   * which is required for Gemini to route the request to its image generation engine.
+   * Convenience method: auto-prepends "Generate image: " prefix.
    */
   async generateImages(prompt: string, options?: GenerateOptions): Promise<GenerateResult> {
     const IMAGE_PREFIX = "Generate image: ";
@@ -198,17 +236,19 @@ export class GeminiClient {
     return this.generate(prefixed, options);
   }
 
-  /**
-   * Update the model used for generation.
-   */
+  /** Update the model used for generation. */
   setModel(model: ModelName | string): void {
     this.model = model;
   }
 
-  /**
-   * Update cookies (e.g. after manual refresh).
-   */
-  setCookies(cookies: GeminiCookies): void {
+  /** Update cookies (not recommended for sessionPath mode). */
+  async setCookies(cookies: GeminiCookies): Promise<void> {
     this.cookies = { ...cookies };
+    if (this.context) {
+      await this.context.addCookies([
+        { name: "__Secure-1PSID", value: this.cookies.psid, domain: ".google.com", path: "/" },
+        { name: "__Secure-1PSIDTS", value: this.cookies.psidts, domain: ".google.com", path: "/" },
+      ]);
+    }
   }
 }

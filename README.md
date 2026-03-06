@@ -7,19 +7,26 @@ Minimal, zero-dependency TypeScript client for generating images through Gemini'
 - 🖼️ **Image generation** via Gemini's web UI (reverse-engineered)
 - 🎯 **Model selection** — choose between Pro and Flash
 - 🍪 **Simple auth** — just provide your browser cookies
-- 🔄 **Cookie rotation** — auto-refresh `__Secure-1PSIDTS`
-- 📦 **Zero runtime dependencies** — only Node.js native `fetch`
+- 🔄 **Cookie rotation** — auto-refresh `__Secure-1PSIDTS` via Playwright
+- 🎭 **Bot Detection Bypass** — routes traffic through a persistent Playwright browser to ensure a real Chrome TLS fingerprint
+- 📦 **Minimal dependencies** — now requires `playwright` for all generation tasks
 - 🔧 **Dual ESM/CJS** — works in any Node.js project
 
 ## Installation
 
 ```bash
-npm install gemini-image-ts
+pnpm add gemini-image-ts playwright
 # or link locally
-npm link
+pnpm link
 ```
 
-> **Requires Node.js 18+** (for native `fetch` support).
+> [!IMPORTANT]
+> **Requires Node.js 18+** and **Playwright**.
+> All requests now run inside a headless Chromium instance to prevent `__Secure-1PSID` cookie invalidation.
+
+## How it Works
+
+Unlike other libraries that use raw `fetch` from Node.js, `gemini-image-ts` launches a headless browser on `client.init()`. This browser stays alive and is reused for all subsequent calls. By executing `fetch` calls inside the browser context, we inherit the real Chrome TLS fingerprint, headers, and behavior, making the automation indistinguishable from a real user.
 
 ## Getting Your Cookies
 
