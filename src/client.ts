@@ -187,10 +187,15 @@ export class GeminiClient {
 
   /**
    * Convenience method: send a prompt and return only the generated images.
-   * Shortcut for `generate(prompt, options)`.
+   * Automatically prepends "Generate image: " to the prompt if not already present,
+   * which is required for Gemini to route the request to its image generation engine.
    */
   async generateImages(prompt: string, options?: GenerateOptions): Promise<GenerateResult> {
-    return this.generate(prompt, options);
+    const IMAGE_PREFIX = "Generate image: ";
+    const prefixed = prompt.trimStart().toLowerCase().startsWith(IMAGE_PREFIX.toLowerCase())
+      ? prompt
+      : `${IMAGE_PREFIX}${prompt}`;
+    return this.generate(prefixed, options);
   }
 
   /**
