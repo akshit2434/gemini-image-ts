@@ -37,14 +37,20 @@ Unlike other libraries that use raw `fetch` from Node.js, `gemini-image-ts` laun
 
 ## Quick Start
 
+### 1. Save your session
+The easiest way to authenticate is to use the provided `save-session` script, which launches a visible browser for you to log in and saves your cookies to a JSON file.
+
+```bash
+pnpm save-session
+```
+
+### 2. Use the client
 ```typescript
 import { GeminiClient } from "gemini-image-ts";
+import path from "path";
 
 const client = new GeminiClient({
-  cookies: {
-    psid: process.env.GEMINI_PSID!,
-    psidts: process.env.GEMINI_PSIDTS!,
-  },
+  sessionPath: path.join(process.cwd(), "gemini-session.json"),
 });
 
 await client.init();
@@ -52,7 +58,10 @@ await client.init();
 const result = await client.generate("Generate a picture of a sunset over mountains");
 
 console.log(result.text);                // Text response
-console.log(result.generatedImages);     // [{ url, title, alt }]
+console.log(result.generatedImages);     // [GeneratedImage, ...]
+
+// Save the first image
+await result.generatedImages[0].save("sunset.jpg", client.page);
 ```
 
 ## Model Selection
@@ -87,37 +96,32 @@ client.setModel("pro");
 
 ### `new GeminiClient(options)`
 
-| Option    | Type               | Default         | Description              |
-| --------- | ------------------ | --------------- | ------------------------ |
-| `cookies` | `{ psid, psidts }` | *required*      | Your Gemini auth cookies |
-| `timeout` | `number`           | `30000`         | Request timeout in ms    |
-| `model`   | `string`           | `"unspecified"` | Default model            |
+| Option        | Type      | Default         | Description                               |
+| ------------- | --------- | --------------- | ----------------------------------------- |
+| `sessionPath` | `string`  | `undefined`     | Path to `storageState.json` (Recommended) |
+| `cookies`     | `object`  | `undefined`     | Raw `{ psid, psidts }` cookies            |
+| `timeout`     | `number`  | `60000`         | Request timeout in ms                     |
+| `model`       | `string`  | `"unspecified"` | Default model                             |
+| `headless`    | `boolean` | `true`          | Run browser in background                 |
 
 ### `client.init()`
 
-Fetches the CSRF token from Gemini's page. **Must be called before generating.**
+Launches the Playwright browser and extracts the essential `SNlM0e` tokens. **Must be called before generating.**
 
 ### `client.generate(prompt, options?)`
 
 Send a prompt and get back text + images.
 
-```typescript
-const result = await client.generate("Generate a cute cat", {
-  model: "flash",  // optional per-request override
-});
+### `GeneratedImage` object
 
-// result.text             → string
-// result.generatedImages  → GeneratedImage[]
-// result.webImages        → WebImage[]
-```
+Images returned in `generatedImages` are instances of the `GeneratedImage` class:
 
-### `client.refreshCookies()`
+- `img.url`: Raw Google URL (requires auth).
+- `await img.save(path, page)`: Download and save the image to disk.
 
-Rotate the `__Secure-1PSIDTS` cookie. Call this if you get auth errors.
+## Session Management
 
-### `client.setModel(model)` / `client.setCookies(cookies)`
-
-Update the default model or cookies at runtime.
+`gemini-image-ts` handles cookie rotation automatically. If your `__Secure-1PSIDTS` cookie expires, the client will attempt to refresh it within the Playwright context and update your `sessionPath` file automatically.
 
 ## Using in Next.js
 
