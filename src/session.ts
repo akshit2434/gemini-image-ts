@@ -94,3 +94,110 @@ export async function saveSession(sessionPath: string): Promise<void> {
 
   await browser.close();
 }
+
+/**
+ * Proactively check if the session in sessionPath is still valid.
+ * Launches a headless browser, loads storageState, and checks for SNlM0e.
+ */
+export async function isSessionValid(sessionPath: string): Promise<boolean> {
+  if (!fs.existsSync(sessionPath)) return false;
+
+  let chromium: typeof import("playwright").chromium;
+  try {
+    const pw = await import("playwright");
+    chromium = pw.chromium;
+  } catch {
+    throw new Error("playwright is required. Install it: pnpm add playwright");
+  }
+
+  const browser = await chromium.launch({
+    headless: true,
+    args: STEALTH_ARGS,
+  });
+
+  try {
+    const context = await browser.newContext({
+      userAgent: USER_AGENT,
+      storageState: sessionPath,
+    });
+    const page = await context.newPage();
+    await page.goto("https://gemini.google.com/app", {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
+
+    const content = await page.content();
+    return content.includes("SNlM0e");
+  } catch (err) {
+    return false;
+  } finally {
+    await browser.close();
+  }
+}
+
+/**
+ * Semi-automatic session recovery. Opens a headed browser for the user to log in,
+ * polls for the SNlM0e token to appear (surviving navigations), then saves the session.
+ */
+export async function autoRecoverSession(sessionPath: string): Promise<void> {
+  console.log("\n🔐 Session expired or not found. Opening browser for re-login...");
+  console.log("👉 Log in to your Google account. The window will close automatically.\n");
+
+  let chromium: typeof import("playwright").chromium;
+  try {
+    const pw = await import("playwright");
+    chromium = pw.chromium;
+  } catch {
+    throw new Error("playwright is required. Install it: pnpm add playwright");
+  }
+
+  const browser = await chromium.launch({
+    headless: false,
+    args: ["--start-maximized", ...STEALTH_ARGS],
+  });
+
+  try {
+    const context = await browser.newContext({ userAgent: USER_AGENT });
+    const page = await context.newPage();
+    await page.goto("https://gemini.google.com/");
+
+    // Poll every 2 seconds for up to 2 minutes
+    // Survives navigation to accounts.google.com and back
+    const deadline = Date.now() + 120_000;
+    let found = false;
+
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const url = page.url();
+        // Only check when we're back on Gemini app, not on landing or login pages
+        if (url.includes("gemini.google.com/app")) {
+          const content = await page.content();
+          // Check for the actual token JSON structure
+          const hasToken = /"SNlM0e":\s*"[^"]+"/.test(content) || 
+                           /'SNlM0e':\s*'[^']+'/.test(content) ||
+                           /"SNlM0e",\s*null,\s*"[^"]+"/.test(content);
+          
+          if (hasToken) {
+            found = true;
+            break;
+          }
+        }
+      } catch {
+        // Page is mid-navigation, swallow and keep polling
+      }
+    }
+
+    if (!found) {
+      throw new Error("⏰ Login timed out after 2 minutes. Please try again.");
+    }
+
+    const dir = sessionPath.substring(0, sessionPath.lastIndexOf("/"));
+    if (dir && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    await context.storageState({ path: sessionPath });
+    console.log("✅ Session saved. Resuming...\n");
+  } finally {
+    await browser.close();
+  }
+}

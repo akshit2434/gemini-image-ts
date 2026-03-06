@@ -21,7 +21,7 @@ async function main() {
     sessionPath: SESSION_PATH,
     model: "flash",
     timeout: 90_000,
-    headless: false,
+    headless: true,
     onProgress: (msg) => console.log(`  [Progress] ${msg}`),
   });
 

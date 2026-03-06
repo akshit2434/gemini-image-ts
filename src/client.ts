@@ -4,7 +4,7 @@ import { AuthError, APIError } from "./errors.js";
 import { parseFramedResponse, extractResult } from "./parser.js";
 import { buildQueryParams, buildRequestBody } from "./payload.js";
 import { extractTokensFromPage } from "./token.js";
-import { isSessionExpired } from "./session.js";
+import { isSessionExpired, isSessionValid, autoRecoverSession } from "./session.js";
 import type {
   GeminiClientOptions,
   GeminiCookies,
@@ -38,6 +38,7 @@ export class GeminiClient {
   private debug: boolean;
   private headless: boolean;
   private onProgress?: (message: string) => void;
+  private keepaliveTimer: NodeJS.Timeout | null = null;
 
   public browser: Browser | null = null;
   public context: BrowserContext | null = null;
@@ -62,22 +63,33 @@ export class GeminiClient {
    * This extracts the necessary tokens while ensuring the session is seen as a real browser.
    */
   async init(): Promise<void> {
-    let chromium: typeof import("playwright").chromium;
+    // Proactive session validation
+    if (this.sessionPath) {
+      const valid = await isSessionValid(this.sessionPath);
+      if (!valid) {
+        await autoRecoverSession(this.sessionPath);
+      }
+    }
+
+    let chromium: any;
     try {
-      const pw = await import("playwright");
-      chromium = pw.chromium;
+      const { chromium: chromiumExtra } = await import("playwright-extra");
+      const { default: StealthPlugin } = await import("puppeteer-extra-plugin-stealth");
+      chromium = chromiumExtra;
+      chromium.use(StealthPlugin());
     } catch {
-      throw new Error("playwright is required. Install it: pnpm add playwright");
+      throw new Error("playwright-extra and puppeteer-extra-plugin-stealth are required.");
     }
 
     if (!this.browser) {
       const startTime = Date.now();
       if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Launching browser (headless: ${this.headless})...`);
       this.onProgress?.("Launching browser...");
-      this.browser = await chromium.launch({
+      const browser = await chromium.launch({
         headless: this.headless,
         args: STEALTH_ARGS,
       });
+      this.browser = browser;
 
       const contextOptions: any = {
         userAgent: USER_AGENT,
@@ -87,17 +99,18 @@ export class GeminiClient {
         contextOptions.storageState = this.sessionPath;
       }
 
-      this.context = await this.browser.newContext(contextOptions);
+      const context = await browser.newContext(contextOptions);
+      this.context = context;
 
       // If raw cookies were provided, set them in the context
       if (!this.sessionPath && this.cookies.psid) {
-        await this.context.addCookies([
+        await context.addCookies([
           { name: "__Secure-1PSID", value: this.cookies.psid, domain: ".google.com", path: "/" },
           { name: "__Secure-1PSIDTS", value: this.cookies.psidts, domain: ".google.com", path: "/" },
         ]);
       }
 
-      this.page = await this.context.newPage();
+      this.page = await context.newPage();
     }
 
     // Optimization: Skip navigation if already on the app page
@@ -137,6 +150,81 @@ export class GeminiClient {
         await this.context!.storageState({ path: this.sessionPath });
       }
     }
+
+    // Start keepalive
+    this.startKeepalive();
+  }
+
+  /**
+   * Start 8-minute keepalive to prevent session death.
+   */
+  private startKeepalive(): void {
+    if (this.keepaliveTimer) return;
+
+    this.keepaliveTimer = setInterval(async () => {
+      if (!this.page || this.page.isClosed()) return;
+
+      try {
+        if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Running keepalive ping...`);
+        
+        // Lightweight GET with credentials
+        await this.page.evaluate(async () => {
+          await fetch("https://gemini.google.com/app", { credentials: "include" });
+        });
+
+        // Persist refreshed state
+        if (this.sessionPath && this.context) {
+          await this.context.storageState({ path: this.sessionPath });
+          if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Keepalive: Session state persisted to disk.`);
+        }
+      } catch (err) {
+        if (this.debug) console.error("[GeminiClient] Keepalive failed:", err);
+      }
+    }, 8 * 60 * 1000); // 8 minutes
+  }
+
+  /**
+   * Stop the keepalive timer.
+   */
+  private stopKeepalive(): void {
+    if (this.keepaliveTimer) {
+      clearInterval(this.keepaliveTimer);
+      this.keepaliveTimer = null;
+    }
+  }
+
+  /**
+   * Fully re-launches context and page with fresh session state.
+   */
+  private async reinitContext(): Promise<void> {
+    if (this.page) await this.page.close().catch(() => {});
+    if (this.context) await this.context.close().catch(() => {});
+    
+    const contextOptions: any = {
+      userAgent: USER_AGENT,
+    };
+
+    if (this.sessionPath) {
+      contextOptions.storageState = this.sessionPath;
+    }
+
+    this.context = await this.browser!.newContext(contextOptions);
+
+    if (!this.sessionPath && this.cookies.psid) {
+      await this.context.addCookies([
+        { name: "__Secure-1PSID", value: this.cookies.psid, domain: ".google.com", path: "/" },
+        { name: "__Secure-1PSIDTS", value: this.cookies.psidts, domain: ".google.com", path: "/" },
+      ]);
+    }
+
+    this.page = await this.context.newPage();
+    await this.page.goto("https://gemini.google.com/app", {
+      waitUntil: "domcontentloaded",
+      timeout: this.timeout,
+    });
+
+    // Re-extract tokens
+    this.tokens = await extractTokensFromPage(this.page);
   }
 
   /**
@@ -228,7 +316,21 @@ export class GeminiClient {
       }
 
       return result;
-    } catch (error) {
+    } catch (error: any) {
+      // Auto-recovery for specific session errors
+      const isSessionError = 
+        error.message?.includes("SNlM0e not found") || 
+        error.message?.toLowerCase().includes("session") ||
+        error.message?.includes("status 401") ||
+        error.message?.includes("status 403");
+
+      if (isSessionError && this.sessionPath && !options?._isRetry) {
+        if (this.debug) console.log("[GeminiClient] Session error detected. Attempting recovery...");
+        await autoRecoverSession(this.sessionPath);
+        await this.reinitContext();
+        return this.generate(prompt, { ...options, _isRetry: true } as GenerateOptions);
+      }
+
       if (error instanceof Error) {
         throw new APIError(error.message);
       }
@@ -240,6 +342,7 @@ export class GeminiClient {
    * Close the browser instance.
    */
   async close(): Promise<void> {
+    this.stopKeepalive();
     if (this.browser) {
       await this.browser.close();
       this.browser = null;
