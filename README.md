@@ -5,6 +5,8 @@ Minimal, lightweight TypeScript client for generating images through Gemini's we
 ## Features
 
 - 🖼️ **Image generation** via Gemini's web UI (reverse-engineered)
+- 💬 **Multi-turn conversation** — stateful chat sessions with context persistence
+- 📁 **File Uploads** — attach images or documents for analysis
 - 🎯 **Model selection** — choose between Pro and Flash
 - 🍪 **Simple auth** — just provide your browser cookies
 - 🔄 **Cookie rotation** — auto-refresh `__Secure-1PSIDTS` via Playwright
@@ -44,7 +46,7 @@ The easiest way to authenticate is to use the provided `save-session` script, wh
 pnpm save-session
 ```
 
-### 2. Use the client
+### 2. Basic Image Generation
 ```typescript
 import { GeminiClient } from "gemini-image-ts";
 import path from "path";
@@ -62,6 +64,30 @@ console.log(result.generatedImages);     // [GeneratedImage, ...]
 
 // Save the first image
 await result.generatedImages[0].save("sunset.jpg", client.page);
+```
+
+### 3. Stateful Chat (Multi-turn)
+Keep track of conversation state with `ChatSession`.
+
+```typescript
+const chat = client.startChat();
+
+// Turn 1
+const res1 = await chat.sendMessage("Hi, I'm planning a trip to Japan.");
+console.log(res1.text);
+
+// Turn 2 - knows about Japan
+const res2 = await chat.sendMessage("What are the best places to visit there?");
+console.log(res2.text);
+```
+
+### 4. File Upload & Analysis
+```typescript
+const result = await client.generate("What is in this document?", {
+  files: [path.resolve("./data.pdf")],
+});
+
+console.log(result.text);
 ```
 
 ## Model Selection
@@ -111,12 +137,24 @@ Launches the Playwright browser and extracts the essential `SNlM0e` tokens. **Mu
 ### `client.generate(prompt, options?)`
 
 Send a prompt and get back text + images.
+- `options.files`: Array of absolute paths or Buffers.
+- `options.metadata`: Optional `ConversationMetadata` for resuming sessions manually.
+
+### `client.startChat(options?)`
+
+Returns a `ChatSession` instance for multi-turn conversations.
+
+### `ChatSession` functions
+- `await chat.sendMessage(prompt, options?)`: Send a message in this session.
+- `chat.getMetadata()`: Get the current conversation metadata (persist this to resume later).
 
 ### `GeneratedImage` object
 
 Images returned in `generatedImages` are instances of the `GeneratedImage` class:
 
 - `img.url`: Raw Google URL (requires auth).
+- `img.alt`: Alt text describing the image.
+- `img.metadata`: Original metadata for the image.
 - `await img.save(path, page)`: Download and save the image to disk.
 
 ## Session Management

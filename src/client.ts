@@ -248,7 +248,17 @@ export class GeminiClient {
     }
 
     const base64Content = fileBuffer.toString("base64");
-    const mimeType = "image/png"; // Default to png for now
+    
+    // Simple MIME type detection by extension
+    let mimeType = "application/octet-stream";
+    const ext = fileName.split('.').pop()?.toLowerCase();
+    if (ext === 'png') mimeType = 'image/png';
+    else if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
+    else if (ext === 'webp') mimeType = 'image/webp';
+    else if (ext === 'pdf') mimeType = 'application/pdf';
+    else if (ext === 'txt') mimeType = 'text/plain';
+    else if (ext === 'md') mimeType = 'text/markdown';
+    else if (ext === 'doc' || ext === 'docx') mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
     if (this.debug) console.log(`[GeminiClient] Uploading file: ${fileName} (${fileBuffer.length} bytes)`);
 
