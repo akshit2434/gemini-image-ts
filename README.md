@@ -1,6 +1,6 @@
 # gemini-image-ts
 
-Minimal, zero-dependency TypeScript client for generating images through Gemini's web interface — no official API key needed.
+Minimal, lightweight TypeScript client for generating images through Gemini's web interface — no official API key needed.
 
 ## Features
 
@@ -8,14 +8,14 @@ Minimal, zero-dependency TypeScript client for generating images through Gemini'
 - 🎯 **Model selection** — choose between Pro and Flash
 - 🍪 **Simple auth** — just provide your browser cookies
 - 🔄 **Cookie rotation** — auto-refresh `__Secure-1PSIDTS` via Playwright
-- 🎭 **Bot Detection Bypass** — routes traffic through a persistent Playwright browser to ensure a real Chrome TLS fingerprint
-- 📦 **Minimal dependencies** — now requires `playwright` for all generation tasks
+- 🎭 **Bot Detection Bypass** — routes traffic through a persistent Playwright browser with stealth plugins
+- 📦 **Dependencies** — requires `playwright`, `playwright-extra`, and `puppeteer-extra-plugin-stealth`
 - 🔧 **Dual ESM/CJS** — works in any Node.js project
 
 ## Installation
 
 ```bash
-pnpm add gemini-image-ts playwright
+pnpm add gemini-image-ts playwright playwright-extra puppeteer-extra-plugin-stealth
 # or link locally
 pnpm link
 ```
@@ -130,7 +130,22 @@ Images returned in `generatedImages` are instances of the `GeneratedImage` class
 npm link
 
 # From your Next.js project:
-npm link gemini-image-ts
+pnpm add gemini-image-ts playwright-extra puppeteer-extra-plugin-stealth
+```
+
+### Next.js Configuration
+
+Due to the use of browser automation and stealth plugins, you must exclude this package and its dependencies from Next.js bundling:
+
+```ts
+// next.config.ts
+const nextConfig = {
+  serverExternalPackages: [
+    "gemini-image-ts",
+    "playwright-extra",
+    "puppeteer-extra-plugin-stealth"
+  ],
+};
 ```
 
 Then import as usual:
