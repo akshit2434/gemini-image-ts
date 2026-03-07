@@ -37,16 +37,18 @@ export function buildQueryParams(
  */
 export function buildRequestBody(
   prompt: string,
-  accessToken: string
+  accessToken: string,
+  fileData?: any[],
+  metadata?: (string | null | number)[]
 ): string {
   // Message content payload
-  const messageContent = [prompt, 0, null, null, null, null, 0];
+  const messageContent = [prompt, 0, null, fileData ?? null, null, null, 0];
 
   // 69-element inner request array
   const innerReqList: (unknown | null)[] = new Array(69).fill(null);
   innerReqList[0] = messageContent;
-  // Empty conversation metadata for a new chat
-  innerReqList[2] = ["", "", "", null, null, null, null, null, null, ""];
+  // Conversation metadata
+  innerReqList[2] = metadata ?? ["", "", "", null, null, null, null, null, null, ""];
   // Enable snapshot streaming
   innerReqList[7] = 1;
 

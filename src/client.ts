@@ -11,8 +11,10 @@ import type {
   GenerateOptions,
   GenerateResult,
   SessionTokens,
+  ConversationMetadata,
 } from "./types.js";
 import type { Browser, BrowserContext, Page } from "playwright";
+import { ChatSession } from "./chat.js";
 
 const STEALTH_ARGS = [
   "--disable-blink-features=AutomationControlled",
@@ -228,6 +230,61 @@ export class GeminiClient {
   }
 
   /**
+   * Upload a file to Google's content-push service.
+   */
+  private async uploadFile(file: string | Buffer): Promise<string> {
+    if (!this.page) throw new Error("Client not initialized.");
+
+    let fileBuffer: Buffer;
+    let fileName = "input_file.png";
+
+    if (typeof file === "string") {
+      const fs = await import("fs");
+      const path = await import("path");
+      fileBuffer = fs.readFileSync(file);
+      fileName = path.basename(file);
+    } else {
+      fileBuffer = file;
+    }
+
+    const base64Content = fileBuffer.toString("base64");
+    const mimeType = "image/png"; // Default to png for now
+
+    if (this.debug) console.log(`[GeminiClient] Uploading file: ${fileName} (${fileBuffer.length} bytes)`);
+
+    const uploadUrl = "https://content-push.googleapis.com/upload";
+    const result = await this.page.evaluate(
+      async ({ url, base64, name, mime }) => {
+        const bin = atob(base64);
+        const uint8 = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) uint8[i] = bin.charCodeAt(i);
+        const blob = new Blob([uint8], { type: mime });
+
+        const formData = new FormData();
+        formData.append("file", blob, name);
+
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Push-ID": "feeds/mcudyrk2a4khkz",
+          },
+          body: formData,
+        });
+
+        if (!response.ok) {
+          throw new Error(`Upload failed with status ${response.status}`);
+        }
+
+        return await response.text();
+      },
+      { url: uploadUrl, base64: base64Content, name: fileName, mime: mimeType }
+    );
+
+    if (this.debug) console.log(`[GeminiClient] File uploaded successfully. ID: ${result}`);
+    return result;
+  }
+
+  /**
    * Send a prompt to Gemini. All network traffic is routed through the Playwright page.
    */
   async generate(prompt: string, options?: GenerateOptions): Promise<GenerateResult> {
@@ -238,10 +295,22 @@ export class GeminiClient {
     const reqId = this.reqId;
     this.reqId += 100000;
 
+    let fileData: any[] | undefined = undefined;
+    if (options?.files && options.files.length > 0) {
+      if (this.debug) console.log(`[GeminiClient] Handling ${options.files.length} file attachments...`);
+      const fileUrls = await Promise.all(options.files.map((f) => this.uploadFile(f)));
+      fileData = fileUrls.map((url, i) => {
+          const name = typeof options.files![i] === 'string' 
+            ? (options.files![i] as string).split('/').pop() 
+            : `file_${i}.png`;
+          return [[url], name];
+      });
+    }
+
     const params = buildQueryParams(reqId, this.tokens);
     const queryString = new URLSearchParams(params).toString();
     const url = `${ENDPOINTS.GENERATE}?${queryString}`;
-    const body = buildRequestBody(prompt, this.tokens.accessToken);
+    const body = buildRequestBody(prompt, this.tokens.accessToken, fileData, options?.metadata);
     if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] 🚀 STARTING GENERATE - Prompt: "${prompt.slice(0, 50)}..."`);
     this.onProgress?.("Generating content...");
 
@@ -377,5 +446,12 @@ export class GeminiClient {
         { name: "__Secure-1PSIDTS", value: this.cookies.psidts, domain: ".google.com", path: "/" },
       ]);
     }
+  }
+
+  /**
+   * Start a new multi-turn chat session.
+   */
+  startChat(metadata?: ConversationMetadata): ChatSession {
+    return new ChatSession(this, metadata);
   }
 }

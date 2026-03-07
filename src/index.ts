@@ -1,5 +1,6 @@
 // Main client
 export { GeminiClient } from "./client.js";
+export { ChatSession } from "./chat.js";
 
 // Types
 export type {
@@ -9,6 +10,7 @@ export type {
   WebImage,
   GenerateResult,
   SessionTokens,
+  ConversationMetadata,
 } from "./types.js";
 export { GeneratedImage } from "./types.js";
 

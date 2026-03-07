@@ -115,6 +115,12 @@ export interface WebImage {
 }
 
 /**
+ * Conversation metadata for multi-turn chats.
+ * [cid, rid, rcid, ...]
+ */
+export type ConversationMetadata = (string | null | number)[];
+
+/**
  * Result from a content generation request.
  */
 export interface GenerateResult {
@@ -124,6 +130,8 @@ export interface GenerateResult {
   generatedImages: GeneratedImage[];
   /** Web images found by the model */
   webImages: WebImage[];
+  /** Conversation metadata for follow-up turns */
+  metadata?: ConversationMetadata;
 }
 
 /**
@@ -144,6 +152,10 @@ export interface SessionTokens {
 export interface GenerateOptions {
   /** Override the model for this request (e.g. "gemini-3.0-flash", "gemini-3.0-pro") */
   model?: ModelName | string;
+  /** Files to attach to the request (images, docs, etc.) */
+  files?: (string | Buffer)[];
+  /** Conversation metadata to continue a previous chat */
+  metadata?: ConversationMetadata;
   /** @internal */
   _isRetry?: boolean;
 }

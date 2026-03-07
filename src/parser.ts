@@ -115,7 +115,11 @@ export function extractResult(envelopes: unknown[], cookies: GeminiCookies): Gen
     text: "",
     generatedImages: [],
     webImages: [],
+    metadata: undefined,
   };
+
+  const genImgMap = new Map<string, GeneratedImage>();
+  const webImgMap = new Map<string, WebImage>();
 
   for (const part of envelopes) {
     // The actual data is double-encoded: part[2] contains a JSON string
@@ -131,11 +135,25 @@ export function extractResult(envelopes: unknown[], cookies: GeminiCookies): Gen
 
     // Candidates list is at partJson[4]
     const candidatesList = getNestedValue(partJson, [4], []) as unknown[];
+    
+    // Extract conversation metadata from partJson if not already set
+    if (!result.metadata) {
+      const cid = getNestedValue(partJson, [1, 0]) as string | undefined;
+      const rid = getNestedValue(partJson, [1, 1]) as string | undefined;
+      if (cid && rid) {
+          result.metadata = [cid, rid, ""];
+      }
+    }
+
     if (!Array.isArray(candidatesList) || candidatesList.length === 0) continue;
 
     for (const candidate of candidatesList) {
       const rcid = getNestedValue(candidate, [0]) as string | undefined;
       if (!rcid) continue;
+
+      if (result.metadata && result.metadata[2] === "") {
+        result.metadata[2] = rcid;
+      }
 
       // Text at candidate[1][0]
       let text = (getNestedValue(candidate, [1, 0], "") as string) || "";
@@ -146,7 +164,8 @@ export function extractResult(envelopes: unknown[], cookies: GeminiCookies): Gen
         ""
       );
 
-      if (text && !result.text) {
+      // Keep the longest text seen (cumulative snapshots)
+      if (text.length > result.text.length) {
         result.text = text;
       }
 
@@ -158,7 +177,7 @@ export function extractResult(envelopes: unknown[], cookies: GeminiCookies): Gen
             | string
             | undefined;
           if (url) {
-            result.webImages.push({
+            webImgMap.set(url, {
               url,
               title: (getNestedValue(webImgData, [7, 0], "") as string) || "",
               alt: (getNestedValue(webImgData, [0, 4], "") as string) || "",
@@ -182,19 +201,23 @@ export function extractResult(envelopes: unknown[], cookies: GeminiCookies): Gen
             const imgNum = getNestedValue(genImgData, [3, 6]) as
               | number
               | undefined;
-            result.generatedImages.push(
-              new GeneratedImage({
-                url: `${url}=s2048`,
+            const fullUrl = `${url}=s2048`;
+            if (!genImgMap.has(fullUrl)) {
+              genImgMap.set(fullUrl, new GeneratedImage({
+                url: fullUrl,
                 title: imgNum ? `[Generated Image ${imgNum}]` : "[Generated Image]",
                 alt: (getNestedValue(genImgData, [3, 5, 0], "") as string) || "",
                 cookies,
-              })
-            );
+              }));
+            }
           }
         }
       }
     }
   }
+
+  result.webImages = Array.from(webImgMap.values());
+  result.generatedImages = Array.from(genImgMap.values());
 
   return result;
 }
