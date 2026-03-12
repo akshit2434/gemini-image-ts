@@ -19,13 +19,15 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "resources"
   ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
     "test": "tsx test/manual.ts",
-    "save-session": "tsx scripts/save-session.ts"
+    "save-session": "tsx scripts/save-session.ts",
+    "extract-masks": "tsx scripts/extract-masks.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -41,6 +43,7 @@
   "dependencies": {
     "playwright": "^1.58.2",
     "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "sharp": "^0.34.5"
   }
 }

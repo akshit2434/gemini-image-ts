@@ -41,10 +41,13 @@ export class GeminiClient {
   private headless: boolean;
   private onProgress?: (message: string) => void;
   private keepaliveTimer: NodeJS.Timeout | null = null;
+  private maskDir: string | null = null;
 
   public browser: Browser | null = null;
   public context: BrowserContext | null = null;
   public page: Page | null = null;
+
+  private maxRetries: number;
 
   constructor(options: GeminiClientOptions) {
     if (!options.sessionPath && !options.cookies) {
@@ -58,6 +61,15 @@ export class GeminiClient {
     this.headless = options.headless ?? true;
     this.onProgress = options.onProgress;
     this.reqId = Math.floor(Math.random() * 90000) + 10000;
+    this.maxRetries = options.maxRetries ?? 3;
+    this.maskDir = options.maskDir ?? null;
+  }
+
+  /**
+   * Helper for exponential backoff.
+   */
+  private async sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**
@@ -296,8 +308,61 @@ export class GeminiClient {
 
   /**
    * Send a prompt to Gemini. All network traffic is routed through the Playwright page.
+   * Includes automated retries for transient errors.
    */
   async generate(prompt: string, options?: GenerateOptions): Promise<GenerateResult> {
+    let lastError: Error | null = null;
+    let attempt = 0;
+    const maxRetries = options?.maxRetries ?? this.maxRetries;
+
+    while (attempt <= maxRetries) {
+      if (attempt > 0) {
+        const backoff = Math.min(1000 * Math.pow(2, attempt), 10000);
+        if (this.debug) console.log(`[GeminiClient] Retry attempt ${attempt}/${maxRetries} in ${backoff}ms...`);
+        await this.sleep(backoff);
+      }
+
+      try {
+        return await this._generateInternal(prompt, options);
+      } catch (error: any) {
+        lastError = error;
+        attempt++;
+
+        const errorMsg = error.message?.toLowerCase() ?? "";
+        const isRetriable = 
+          errorMsg.includes("failed to fetch") || 
+          errorMsg.includes("status 429") || 
+          errorMsg.includes("empty response") ||
+          errorMsg.includes("snlm0e not found") ||
+          errorMsg.includes("status 401") ||
+          errorMsg.includes("status 403");
+
+        if (!isRetriable || attempt > maxRetries) {
+          break;
+        }
+
+        if (this.debug) console.log(`[GeminiClient] Encountered retriable error: ${error.message}`);
+        
+        // If it's a session/auth error, try to refresh tokens before retrying
+        if (errorMsg.includes("snlm0e") || errorMsg.includes("401") || errorMsg.includes("403")) {
+          if (this.debug) console.log("[GeminiClient] Attempting session recovery before retry...");
+          try {
+            if (this.sessionPath) await autoRecoverSession(this.sessionPath);
+            await this.reinitContext();
+          } catch (recoveryError) {
+            if (this.debug) console.error("[GeminiClient] Session recovery failed:", recoveryError);
+          }
+        }
+      }
+    }
+
+    throw lastError ?? new APIError("Generation failed after multiple attempts.");
+  }
+
+  /**
+   * Internal generation logic.
+   */
+  private async _generateInternal(prompt: string, options?: GenerateOptions): Promise<GenerateResult> {
     if (!this.tokens || !this.page) {
       throw new AuthError("Client not initialized. Call `await client.init()` first.");
     }
@@ -342,80 +407,56 @@ export class GeminiClient {
       console.log(`[GeminiClient] URL: ${url}`);
     }
 
-    try {
-      // Ensure page is still alive, if not re-init
-      if (!this.page || this.page.isClosed()) {
-        if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Page closed or missing, re-initializing...`);
-        await this.init();
-      }
-
-      // Execute the request INSIDE the browser context
-      const rawText = await this.page!.evaluate(
-        async ({ url, body, headers }) => {
-          const response = await fetch(url, {
-            method: "POST",
-            headers,
-            body,
-          });
-
-          if (!response.ok) {
-            throw new Error(`Gemini request failed with status ${response.status}`);
-          }
-
-          return await response.text();
-        },
-        { url, body, headers }
-      );
-
-      const envelopes = parseFramedResponse(rawText);
-      if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Initial API request took ${Date.now() - genStart}ms`);
-
-      if (envelopes.length === 0) {
-        throw new APIError("Empty response from Gemini.");
-      }
-
-      const result = extractResult(envelopes, this.cookies);
-
-      if (this.debug) {
-        console.log(`[${new Date().toISOString()}] [GeminiClient] Extracted text: "${result.text.slice(0, 100)}..."`);
-        console.log(`[${new Date().toISOString()}] [GeminiClient] Found ${result.generatedImages.length} generated images.`);
-      }
-
-      // Auto-refresh and retry if session expired mid-run
-      if (
-        result.generatedImages.length === 0 &&
-        isSessionExpired(result.text) &&
-        !options?._isRetry
-      ) {
-        if (this.debug) {
-          console.log("[GeminiClient] Session expiry detected in response text. Refreshing...");
-        }
-        await this.init();
-        return this.generate(prompt, { ...options, _isRetry: true } as GenerateOptions);
-      }
-
-      return result;
-    } catch (error: any) {
-      // Auto-recovery for specific session errors
-      const isSessionError = 
-        error.message?.includes("SNlM0e not found") || 
-        error.message?.toLowerCase().includes("session") ||
-        error.message?.includes("status 401") ||
-        error.message?.includes("status 403");
-
-      if (isSessionError && this.sessionPath && !options?._isRetry) {
-        if (this.debug) console.log("[GeminiClient] Session error detected. Attempting recovery...");
-        await autoRecoverSession(this.sessionPath);
-        await this.reinitContext();
-        return this.generate(prompt, { ...options, _isRetry: true } as GenerateOptions);
-      }
-
-      if (error instanceof Error) {
-        throw new APIError(error.message);
-      }
-      throw error;
+    // Ensure page is still alive, if not re-init
+    if (!this.page || this.page.isClosed()) {
+      if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Page closed or missing, re-initializing...`);
+      await this.init();
     }
+
+    // Execute the request INSIDE the browser context
+    const rawText = await this.page!.evaluate(
+      async ({ url, body, headers }) => {
+        const response = await fetch(url, {
+          method: "POST",
+          headers,
+          body,
+        });
+
+        if (!response.ok) {
+          throw new Error(`Gemini request failed with status ${response.status}`);
+        }
+
+        return await response.text();
+      },
+      { url, body, headers }
+    );
+
+    const envelopes = parseFramedResponse(rawText);
+    if (this.debug) console.log(`[${new Date().toISOString()}] [GeminiClient] Initial API request took ${Date.now() - genStart}ms`);
+
+    if (envelopes.length === 0) {
+      throw new APIError("Empty response from Gemini.");
+    }
+
+    const result = extractResult(envelopes, this.cookies, this.maskDir ?? undefined);
+
+    if (this.debug) {
+      console.log(`[${new Date().toISOString()}] [GeminiClient] Extracted text: "${result.text.slice(0, 100)}..."`);
+      console.log(`[${new Date().toISOString()}] [GeminiClient] Found ${result.generatedImages.length} generated images.`);
+    }
+
+    // Auto-refresh and retry if session expired mid-run
+    if (
+      result.generatedImages.length === 0 &&
+      isSessionExpired(result.text)
+    ) {
+      throw new AuthError("Session expiry detected in response text.");
+    }
+
+
+    return result;
   }
+
 
   /**
    * Close the browser instance.

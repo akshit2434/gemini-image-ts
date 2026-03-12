@@ -110,7 +110,7 @@ export function parseFramedResponse(raw: string): unknown[] {
 /**
  * Extract generated images, web images, and text from parsed response envelopes.
  */
-export function extractResult(envelopes: unknown[], cookies: GeminiCookies): GenerateResult {
+export function extractResult(envelopes: unknown[], cookies: GeminiCookies, maskDir?: string): GenerateResult {
   const result: GenerateResult = {
     text: "",
     generatedImages: [],
@@ -208,6 +208,7 @@ export function extractResult(envelopes: unknown[], cookies: GeminiCookies): Gen
                 title: imgNum ? `[Generated Image ${imgNum}]` : "[Generated Image]",
                 alt: (getNestedValue(genImgData, [3, 5, 0], "") as string) || "",
                 cookies,
+                maskDir,
               }));
             }
           }

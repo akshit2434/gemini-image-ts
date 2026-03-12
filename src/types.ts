@@ -1,5 +1,7 @@
 import type { ModelName } from "./constants.js";
 import type { Page } from "playwright";
+import { removeGeminiWatermark } from "./watermark.js";
+import type { WatermarkOptions } from "./watermark.js";
 
 /**
  * Cookie values required to authenticate with Gemini.
@@ -37,6 +39,10 @@ export interface GeminiClientOptions {
   headless?: boolean;
   /** Callback for progress updates */
   onProgress?: (message: string) => void;
+  /** Maximum number of retries for transient errors (default: 3) */
+  maxRetries?: number;
+  /** Directory containing watermark masks (mask-48.png, mask-96.png). Needed for watermark removal. */
+  maskDir?: string;
 }
 
 /**
@@ -52,12 +58,15 @@ export class GeneratedImage {
   readonly alt: string;
   /** Cookies needed to download this image */
   private readonly cookies: GeminiCookies;
+  /** Default mask directory from the client */
+  private readonly maskDir?: string;
 
-  constructor(opts: { url: string; title: string; alt: string; cookies: GeminiCookies }) {
+  constructor(opts: { url: string; title: string; alt: string; cookies: GeminiCookies; maskDir?: string }) {
     this.url = opts.url;
     this.title = opts.title;
     this.alt = opts.alt;
     this.cookies = opts.cookies;
+    this.maskDir = opts.maskDir;
   }
 
   /**
@@ -90,11 +99,32 @@ export class GeneratedImage {
    * Download the image and save it to the given file path.
    * @param filePath - Absolute or relative path to write the image to.
    * @param page - Optional Playwright Page for the download.
+   * @param watermarkOptions - Optional options for watermark removal.
    */
-  async save(filePath: string, page?: Page): Promise<void> {
+  async save(
+    filePath: string,
+    page?: Page,
+    watermarkOptions?: WatermarkOptions
+  ): Promise<void> {
     const { writeFile } = await import("fs/promises");
-    const buffer = await this.download(page);
+    let buffer = await this.download(page);
+
+    const effectiveOptions = watermarkOptions || (this.maskDir ? { maskDir: this.maskDir } : {});
+
+    if (effectiveOptions) {
+      buffer = await removeGeminiWatermark(buffer, effectiveOptions);
+    }
+
     await writeFile(filePath, buffer);
+  }
+
+  /**
+   * Removes the watermark from an image buffer.
+   * @param buffer - The raw image buffer.
+   * @param options - Watermark removal options.
+   */
+  async removeWatermark(buffer: Buffer, options: WatermarkOptions): Promise<Buffer> {
+    return removeGeminiWatermark(buffer, options);
   }
 
   toJSON() {
@@ -156,6 +186,10 @@ export interface GenerateOptions {
   files?: (string | Buffer)[];
   /** Conversation metadata to continue a previous chat */
   metadata?: ConversationMetadata;
+  /** Options for watermark removal */
+  removeWatermark?: WatermarkOptions;
   /** @internal */
   _isRetry?: boolean;
+  /** Maximum number of retries for this specific request */
+  maxRetries?: number;
 }
